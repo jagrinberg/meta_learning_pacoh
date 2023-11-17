@@ -4,6 +4,7 @@ import math
 from collections import OrderedDict
 from config import device
 from meta_learn.util import find_root_by_bounding
+from gpytorch.kernels import ScaleKernel, RBFKernel
 
 """ ----------------------------------------------------"""
 """ ------------ Probability Distributions ------------ """
@@ -559,9 +560,11 @@ class LearnedGPRegressionModelApproximate(ApproximateGP):
             self.mean_module = gpytorch.means.ZeroMean()
         else:
             self.mean_module = mean_module
-
+        
         self.covar_module = covar_module
-
+        # check if covar_module is of class InducingPointKernel
+        if isinstance(self.covar_module, gpytorch.kernels.InducingPointKernel):
+            self.base_covar_module = ScaleKernel(RBFKernel())
         self.learned_kernel = learned_kernel
         self.learned_mean = learned_mean
         self.likelihood = likelihood

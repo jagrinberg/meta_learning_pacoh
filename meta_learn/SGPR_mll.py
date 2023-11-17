@@ -1,4 +1,6 @@
 import gpytorch
+from gpytorch.kernels import InducingPointKernel, ScaleKernel, RBFKernel
+from gpytorch.distributions import MultivariateNormal
 import time
 import torch
 import numpy as np
@@ -7,9 +9,7 @@ from meta_learn.models import LearnedGPRegressionModel, NeuralNetwork, AffineTra
 from meta_learn.abstract import RegressionModel
 from config import device
 
-
-class GPRegressionLearned(RegressionModel):
-
+class SparseGPRegressionLearned(RegressionModel):
     def __init__(self, train_x, train_t, learning_mode='both', lr=1e-3, weight_decay=0.0, feature_dim=2,
                  num_iter_fit=1000, covar_module='NN', mean_module='NN', mean_nn_layers=(32, 32), kernel_nn_layers=(32, 32),
                  optimizer='Adam', normalize_data=True, lr_scheduler=True, random_seed=None):
@@ -50,19 +50,23 @@ class GPRegressionLearned(RegressionModel):
 
         """  ------ Setup model ------ """
         self.parameters = []
+        self.likelihood = gpytorch.likelihoods.GaussianLikelihood().to(device)
 
         # A) determine kernel map & module
+        inducing_points = self.train_x_tensor[:10]  # Select first few points as inducing points
 
         if covar_module == 'NN':
             assert learning_mode in ['learn_kernel', 'both'], 'neural network parameters must be learned'
             nn_kernel_map = NeuralNetwork(input_dim=self.input_dim, output_dim=feature_dim, layer_sizes=kernel_nn_layers).to(device)
             self.parameters.append({'params': nn_kernel_map.parameters(), 'lr': self.lr, 'weight_decay': self.weight_decay})
-            covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=feature_dim)).to(device)
+            base_kernel = gpytorch.kernels.RBFKernel(ard_num_dims=feature_dim)
+            covar_module = InducingPointKernel(base_kernel, inducing_points=inducing_points, likelihood=self.likelihood).to(device)
         else:
             nn_kernel_map = None
 
         if covar_module == 'SE':
-            covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=self.input_dim)).to(device)
+            base_kernel = gpytorch.kernels.RBFKernel(ard_num_dims=self.input_dim)
+            covar_module = InducingPointKernel(base_kernel, inducing_points=inducing_points, likelihood=self.likelihood).to(device)
         # B) determine mean map & module
 
         if mean_module == 'NN':
@@ -80,7 +84,6 @@ class GPRegressionLearned(RegressionModel):
 
         # C) setup GP model
 
-        self.likelihood = gpytorch.likelihoods.GaussianLikelihood().to(device)
         self.parameters.append({'params': self.likelihood.parameters(), 'lr': self.lr})
 
         self.model = LearnedGPRegressionModel(self.train_x_tensor, self.train_t_tensor, self.likelihood,
@@ -213,39 +216,3 @@ class GPRegressionLearned(RegressionModel):
 
     def _vectorize_pred_dist(self, pred_dist):
         return torch.distributions.Normal(pred_dist.mean, pred_dist.stddev)
-
-if __name__ == "__main__":
-    import torch
-    import numpy as np
-    from matplotlib import pyplot as plt
-
-    n_train_samples = 20
-    n_test_samples = 200
-
-    torch.manual_seed(25)
-    x_data = torch.normal(mean=-1, std=2.0, size=(n_train_samples + n_test_samples, 1))
-    W = torch.tensor([[0.6]])
-    b = torch.tensor([-1])
-    y_data = x_data.matmul(W.T) + torch.sin((0.6 * x_data)**2) + b + torch.normal(mean=0.0, std=0.1, size=(n_train_samples + n_test_samples, 1))
-
-    x_data_train, x_data_test = x_data[:n_train_samples].numpy(), x_data[n_train_samples:].numpy()
-    y_data_train, y_data_test = y_data[:n_train_samples].numpy(), y_data[n_train_samples:].numpy()
-
-    gp_mll = GPRegressionLearned(x_data_train, y_data_train, mean_module='NN', covar_module='SE', mean_nn_layers=(32, 32, 32, 32), weight_decay=0.5,
-                                 num_iter_fit=10000)
-    gp_mll.fit(x_data_test, y_data_test)
-
-
-    x_plot = np.linspace(6, -6, num=200)
-    gp_mll.confidence_intervals(x_plot)
-
-    pred_mean, pred_std = gp_mll.predict(x_plot)
-    pred_mean, pred_std = pred_mean.flatten(), pred_std.flatten()
-
-    plt.scatter(x_data_test, y_data_test)
-    plt.plot(x_plot, pred_mean)
-
-    #lcb, ucb = pred_mean - pred_std, pred_mean + pred_std
-    lcb, ucb = gp_mll.confidence_intervals(x_plot)
-    plt.fill_between(x_plot, lcb, ucb, alpha=0.4)
-    plt.show()
