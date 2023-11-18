@@ -9,11 +9,11 @@ from meta_learn.util import _handle_input_dimensionality, DummyLRScheduler
 from meta_learn.abstract import RegressionModelMetaLearned
 from config import device
 
-class GPRegressionMetaLearned(RegressionModelMetaLearned):
+class SparseGPRegressionMetaLearned(RegressionModelMetaLearned):
 
     def __init__(self, meta_train_data, learning_mode='both', lr_params=1e-3, weight_decay=0.0, feature_dim=2,
                  num_iter_fit=10000, covar_module='NN', mean_module='NN', mean_nn_layers=(32, 32), kernel_nn_layers=(32, 32),
-                 task_batch_size=5, normalize_data=True, optimizer='Adam', lr_decay=1.0, random_seed=None):
+                 task_batch_size=5, normalize_data=True, optimizer='Adam', lr_decay=1.0, random_seed=None, num_inducing_points=1):
         """
         Meta-Learning GP priors (i.e. mean and kernel function) via PACOH-MAP
 
@@ -48,6 +48,7 @@ class GPRegressionMetaLearned(RegressionModelMetaLearned):
         # Check that data all has the same size
         self._check_meta_data_shapes(meta_train_data)
         self._compute_normalization_stats(meta_train_data)
+        self.num_inducing_points = num_inducing_points
 
         # Setup components that are shared across tasks
         self._setup_gp_prior(mean_module, covar_module, learning_mode, feature_dim, mean_nn_layers, kernel_nn_layers)
@@ -64,13 +65,16 @@ class GPRegressionMetaLearned(RegressionModelMetaLearned):
             # a) prepare data
             x_tensor, y_tensor = self._prepare_data_per_task(train_x, train_y)
             task_dict['train_x'], task_dict['train_y'] = x_tensor, y_tensor
-
             # b) prepare model
+            inducing_points_1 = np.random.choice(x_tensor.cpu().numpy().flatten(), size=self.num_inducing_points, replace=False)
+            inducing_points_2 = np.random.choice(y_tensor.cpu().numpy().flatten(), size=self.num_inducing_points, replace=False)
+            inducing_points = np.concatenate((inducing_points_1, inducing_points_2), axis=0).reshape(self.num_inducing_points, self.feature_dim)
+            inducing_points = torch.from_numpy(inducing_points).float().to(device)
             task_dict['model'] = LearnedGPRegressionModel(task_dict['train_x'], task_dict['train_y'], self.likelihood,
-                                              learned_kernel=self.nn_kernel_map, learned_mean=self.nn_mean_fn,
-                                              covar_module=self.covar_module, mean_module=self.mean_module)
+                                                learned_kernel=self.nn_kernel_map, learned_mean=self.nn_mean_fn,
+                                                covar_module=gpytorch.kernels.InducingPointKernel(gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=feature_dim)), inducing_points=inducing_points, likelihood=self.likelihood),
+                                                mean_module=self.mean_module)
             task_dict['mll_fn'] = gpytorch.mlls.ExactMarginalLogLikelihood(self.likelihood, task_dict['model']).to(device)
-
             self.task_dicts.append(task_dict) 
 
         # c) prepare inference
@@ -173,9 +177,14 @@ class GPRegressionMetaLearned(RegressionModelMetaLearned):
 
         with torch.no_grad():
             # compute posterior given the context data
+            inducing_points_1 = np.random.choice(context_x.cpu().numpy().flatten(), size=self.num_inducing_points, replace=False)
+            inducing_points_2 = np.random.choice(context_y.cpu().numpy().flatten(), size=self.num_inducing_points, replace=False)
+            inducing_points = np.concatenate((inducing_points_1, inducing_points_2), axis=0).reshape(self.num_inducing_points, self.feature_dim)
+            inducing_points = torch.from_numpy(inducing_points).float().to(device)
             gp_model = LearnedGPRegressionModel(context_x, context_y, self.likelihood,
                                                 learned_kernel=self.nn_kernel_map, learned_mean=self.nn_mean_fn,
-                                                covar_module=self.covar_module, mean_module=self.mean_module)
+                                                covar_module=gpytorch.kernels.InducingPointKernel(gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=self.feature_dim)), inducing_points=inducing_points, likelihood=self.likelihood),
+                                                mean_module=self.mean_module)
             gp_model.eval()
             self.likelihood.eval()
             pred_dist = self.likelihood(gp_model(test_x))
@@ -291,7 +300,7 @@ if __name__ == "__main__":
     torch.set_num_threads(2)
 
     for weight_decay in [0.8, 0.5, 0.4, 0.3, 0.2, 0.1]:
-        gp_model = GPRegressionMetaLearned(meta_train_data, num_iter_fit=20000, weight_decay=weight_decay, task_batch_size=2,
+        gp_model = SparseGPRegressionMetaLearned(meta_train_data, num_iter_fit=20000, weight_decay=weight_decay, task_batch_size=2,
                                              covar_module='NN', mean_module='NN', mean_nn_layers=NN_LAYERS,
                                              kernel_nn_layers=NN_LAYERS)
         itrs = 0

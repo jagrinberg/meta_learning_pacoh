@@ -5,3 +5,4 @@ from .GPR_mll import GPRegressionLearned
 from .MAML import MAMLRegression
 from .NPR_meta import NPRegressionMetaLearned
 from .SGPR_mll import SparseGPRegressionLearned
+from .SGPR_meta_mll import SparseGPRegressionMetaLearned

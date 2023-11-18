@@ -9,6 +9,10 @@ from collections import OrderedDict
 from meta_learn.models import LearnedGPRegressionModel, ConstantMeanLight, SEKernelLight, GaussianLikelihoodLight, \
     VectorizedModel, CatDist, NeuralNetworkVectorized
 from config import device
+from gpytorch.kernels import ScaleKernel, RBFKernel, InducingPointKernel
+from gpytorch.means import ConstantMean, ZeroMean
+from gpytorch.likelihoods import GaussianLikelihood
+from gpytorch.distributions import MultivariateNormal
 
 
 def _filter(dict, str):
@@ -220,6 +224,53 @@ class RandomGPMeta(_RandomGPBase):
 
     def log_prob(self, params, train_data_tuples):
         return self.prior_factor * self._log_prob_prior(params) + self._log_prob_likelihood(params, train_data_tuples)
+
+class RandomGPSparseMeta(gpytorch.models.ApproximateGP):
+    def __init__(self, inducing_points, feature_dim=1, prior_factor=0.01,
+                 weight_prior_std=0.5, bias_prior_std=3.0, covar_module='SE', mean_module='NN',
+                 mean_nn_layers=(32, 32), kernel_nn_layers=(32, 32)):
+        """
+        Sparse Gaussian Process Meta Model.
+        Args:
+            inducing_points: Tensor of inducing points.
+            feature_dim: Output dimensionality of NN feature map for kernel function.
+            prior_factor, weight_prior_std, bias_prior_std, covar_module, mean_module, 
+            mean_nn_layers, kernel_nn_layers: Same as in RandomGPMeta.
+        """
+        variational_distribution = gpytorch.variational.CholeskyVariationalDistribution(
+            inducing_points.size(-2))
+        variational_strategy = gpytorch.variational.VariationalStrategy(
+            self, inducing_points, variational_distribution, learn_inducing_locations=True)
+        super(RandomGPSparseMeta, self).__init__(variational_strategy)
+
+        # Define mean and covariance modules
+        if mean_module == 'NN':
+            self.mean_module = NeuralNetworkMean(input_dim=inducing_points.size(-1), 
+                                                 output_dim=feature_dim, 
+                                                 layer_sizes=mean_nn_layers)
+        elif mean_module == 'constant':
+            self.mean_module = ConstantMean()
+        elif mean_module == 'zero':
+            self.mean_module = ZeroMean()
+        else:
+            raise NotImplementedError('Mean module type not supported.')
+
+        if covar_module == 'SE':
+            self.covar_module = ScaleKernel(RBFKernel())
+        elif covar_module == 'NN':
+            self.covar_module = NeuralNetworkCovar(input_dim=inducing_points.size(-1), 
+                                                   output_dim=feature_dim, 
+                                                   layer_sizes=kernel_nn_layers)
+        else:
+            raise NotImplementedError('Covariance module type not supported.')
+
+        # Likelihood
+        self.likelihood = GaussianLikelihood()
+
+    def forward(self, x):
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return MultivariateNormal(mean_x, covar_x)
 
 class RandomGPPosterior(torch.nn.Module):
     """
