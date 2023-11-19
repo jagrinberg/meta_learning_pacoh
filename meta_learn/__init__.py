@@ -6,3 +6,5 @@ from .MAML import MAMLRegression
 from .NPR_meta import NPRegressionMetaLearned
 from .SGPR_mll import SparseGPRegressionLearned
 from .SGPR_meta_mll import SparseGPRegressionMetaLearned
+from .SGPR_meta_vi import SparseGPRegressionMetaLearnedVI
+from .SGPR_meta_svgd import SparseGPRegressionMetaLearnedSVGD

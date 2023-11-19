@@ -446,12 +446,12 @@ class SEKernelLight(gpytorch.kernels.Kernel):
                                                                     postprocess=False,
                                                                     **params))
 
-class HomoskedasticNoiseLight(gpytorch.likelihoods.noise_models._HomoskedasticNoiseBase):
+class HomoskedasticNoiseLight(torch.nn.Module):
 
-    def __init__(self, noise_var, *params, **kwargs):
-        self.noise_var = noise_var
-        self._modules = {}
-        self._parameters = {}
+    def __init__(self, noise_var):
+        super().__init__()
+        # Ensure that noise_var is a PyTorch Parameter or Tensor
+        self.noise_var = torch.nn.Parameter(torch.tensor(noise_var)) if not isinstance(noise_var, torch.Tensor) else noise_var
 
     @property
     def noise(self):
@@ -460,6 +460,7 @@ class HomoskedasticNoiseLight(gpytorch.likelihoods.noise_models._HomoskedasticNo
     @noise.setter
     def noise(self, value):
         self.noise_var = value
+
 
 class GaussianLikelihoodLight(gpytorch.likelihoods._GaussianLikelihoodBase):
 

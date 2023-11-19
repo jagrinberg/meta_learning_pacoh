@@ -72,7 +72,7 @@ class SparseGPRegressionMetaLearned(RegressionModelMetaLearned):
             inducing_points = torch.from_numpy(inducing_points).float().to(device)
             task_dict['model'] = LearnedGPRegressionModel(task_dict['train_x'], task_dict['train_y'], self.likelihood,
                                                 learned_kernel=self.nn_kernel_map, learned_mean=self.nn_mean_fn,
-                                                covar_module=gpytorch.kernels.InducingPointKernel(gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=feature_dim)), inducing_points=inducing_points, likelihood=self.likelihood),
+                                                covar_module=gpytorch.kernels.InducingPointKernel(gpytorch.kernels.RBFKernel(ard_num_dims=feature_dim), inducing_points=inducing_points, likelihood=self.likelihood),
                                                 mean_module=self.mean_module)
             task_dict['mll_fn'] = gpytorch.mlls.ExactMarginalLogLikelihood(self.likelihood, task_dict['model']).to(device)
             self.task_dicts.append(task_dict) 
@@ -183,7 +183,7 @@ class SparseGPRegressionMetaLearned(RegressionModelMetaLearned):
             inducing_points = torch.from_numpy(inducing_points).float().to(device)
             gp_model = LearnedGPRegressionModel(context_x, context_y, self.likelihood,
                                                 learned_kernel=self.nn_kernel_map, learned_mean=self.nn_mean_fn,
-                                                covar_module=gpytorch.kernels.InducingPointKernel(gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(ard_num_dims=self.feature_dim)), inducing_points=inducing_points, likelihood=self.likelihood),
+                                                covar_module=gpytorch.kernels.InducingPointKernel(gpytorch.kernels.RBFKernel(ard_num_dims=self.feature_dim), inducing_points=inducing_points, likelihood=self.likelihood),
                                                 mean_module=self.mean_module)
             gp_model.eval()
             self.likelihood.eval()

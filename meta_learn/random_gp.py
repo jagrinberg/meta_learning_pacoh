@@ -22,6 +22,103 @@ def _filter(dict, str):
             result[key] = val
     return result
 
+class SparseVectorizedGP(VectorizedModel):
+
+    def __init__(self, input_dim, feature_dim=2, covar_module_str='SE', mean_module_str='constant',
+                 mean_nn_layers=(32, 32), kernel_nn_layers=(32, 32), nonlinearlity=torch.tanh, num_inducing_points=5):
+        super().__init__(input_dim, 1)
+
+
+        self._params = OrderedDict()
+        self.mean_module_str = mean_module_str
+        self.covar_module_str = covar_module_str
+        self.num_inducing_points = num_inducing_points
+        if mean_module_str == 'NN':
+            self.mean_nn = self._param_module('mean_nn', NeuralNetworkVectorized(input_dim, 1,
+                                                         layer_sizes=mean_nn_layers, nonlinearlity=nonlinearlity))
+        elif mean_module_str == 'constant':
+            self.constant_mean = self._param('constant_mean', torch.zeros(1, 1))
+        else:
+            raise NotImplementedError
+
+
+        if covar_module_str == "NN":
+            self.kernel_nn = self._param_module('kernel_nn', NeuralNetworkVectorized(input_dim, feature_dim,
+                                                        layer_sizes=kernel_nn_layers, nonlinearlity=nonlinearlity))
+            self.lengthscale_raw = self._param('lengthscale_raw', torch.zeros(1, feature_dim))
+        elif covar_module_str == 'SE':
+            self.lengthscale_raw = self._param('lengthscale_raw', torch.zeros(1, input_dim))
+        else:
+            raise NotImplementedError
+
+        self.noise_raw = self._param('noise_raw', torch.zeros(1, 1))
+
+
+    def forward(self, x_data, y_data, train=True, prior=False):
+        assert x_data.ndim == 3
+
+        if self.mean_module_str == 'NN':
+            learned_mean = self.mean_nn
+            mean_module = None
+        else:
+            learned_mean = None
+            mean_module = ConstantMeanLight(self.constant_mean)
+
+        if self.covar_module_str == "NN":
+            learned_kernel = self.kernel_nn
+        else:
+            learned_kernel = None
+
+        lengthscale = F.softplus(self.lengthscale_raw)
+        lengthscale = lengthscale.view(lengthscale.shape[0], 1, lengthscale.shape[1])
+        covar_module = SEKernelLight(lengthscale)
+
+        noise = F.softplus(self.noise_raw)
+        # calculate likelihood based on noise
+        likelihood = GaussianLikelihoodLight(noise) 
+        base_layer = RBFKernel(ard_num_dims=x_data.shape[-1])
+        covar_module = InducingPointKernel(base_layer, inducing_points=x_data[:self.num_inducing_points, :, :], likelihood=likelihood)
+        gp = LearnedGPRegressionModel(x_data, y_data, likelihood, mean_module=mean_module, covar_module=covar_module,
+                                      learned_mean=learned_mean, learned_kernel=learned_kernel)
+        if prior:
+            gp.train()
+            likelihood.train()
+            return gp, likelihood
+        else:
+            if train:
+                mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, gp)
+                output = gp(x_data)
+                return likelihood(output), mll(output, y_data)
+            else: # --> eval
+                gp.eval()
+                likelihood.eval()
+                return gp, likelihood
+
+    def parameter_shapes(self):
+        return OrderedDict([(name, param.shape) for name, param in self.named_parameters().items()])
+
+    def named_parameters(self):
+        return self._params
+
+    def _param_module(self, name, module):
+        assert type(name) == str
+        assert hasattr(module, 'named_parameters')
+        for param_name, param in module.named_parameters().items():
+            self._param(name + '.' + param_name, param)
+        return module
+
+    def _param(self, name, tensor):
+        assert type(name) == str
+        assert isinstance(tensor, torch.Tensor)
+        assert name not in list(self._params.keys())
+        if not device.type == tensor.device.type:
+            tensor = tensor.to(device)
+        self._params[name] = tensor
+        return tensor
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
 
 class VectorizedGP(VectorizedModel):
 
@@ -116,6 +213,83 @@ class VectorizedGP(VectorizedModel):
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
+
+class _RandomSparseGPBase:
+    def __init__(self, size_in, prior_factor=1.0, weight_prior_std=1.0, bias_prior_std=3.0, num_inducing_points=5, **kwargs):
+
+        self._params = OrderedDict()
+        self._param_dists = OrderedDict()
+
+        self.prior_factor = prior_factor
+        self.gp = SparseVectorizedGP(size_in, num_inducing_points=num_inducing_points, **kwargs)
+
+        for name, shape in self.gp.parameter_shapes().items():
+
+            if name == 'constant_mean':
+                mean_p_loc = torch.zeros(1).to(device)
+                mean_p_scale = torch.ones(1).to(device)
+                self._param_dist(name, Normal(mean_p_loc, mean_p_scale).to_event(1))
+
+            if name == 'lengthscale_raw':
+                lengthscale_p_loc = torch.zeros(shape[-1]).to(device)
+                lengthscale_p_scale = torch.ones(shape[-1]).to(device)
+                self._param_dist(name, Normal(lengthscale_p_loc, lengthscale_p_scale).to_event(1))
+
+            if name == 'noise_raw':
+                noise_p_loc = -1. * torch.ones(1).to(device)
+                noise_p_scale = torch.ones(1).to(device)
+                self._param_dist(name, Normal(noise_p_loc, noise_p_scale).to_event(1))
+
+            if 'mean_nn' in name or 'kernel_nn' in name:
+                mean = torch.zeros(shape).to(device)
+                if "weight" in name:
+                    std = weight_prior_std * torch.ones(shape).to(device)
+                elif "bias" in name:
+                    std = bias_prior_std * torch.ones(shape).to(device)
+                else:
+                    raise NotImplementedError
+                self._param_dist(name, Normal(mean, std).to_event(1))
+
+        # check that parameters in prior and gp modules are aligned
+        for param_name_gp, param_name_prior in zip(self.gp.named_parameters().keys(), self._param_dists.keys()):
+            assert param_name_gp == param_name_prior
+
+        self.hyper_prior = CatDist(self._param_dists.values())
+
+    def sample_params_from_prior(self, shape=torch.Size()):
+        return self.hyper_prior.sample(shape)
+
+    def sample_fn_from_prior(self, shape=torch.Size()):
+        params = self.sample_params_from_prior(shape=shape)
+        return self.get_forward_fn(params)
+
+    def get_forward_fn(self, params):
+        gp_model = copy.deepcopy(self.gp)
+        gp_model.set_parameters_as_vector(params)
+        return gp_model
+
+    def _param_dist(self, name, dist):
+        assert type(name) == str
+        assert isinstance(dist, torch.distributions.Distribution)
+        assert name not in list(self._param_dists.keys())
+        assert hasattr(dist, 'rsample')
+        self._param_dists[name] = dist
+        return dist
+
+    def _log_prob_prior(self, params):
+        return self.hyper_prior.log_prob(params)
+
+    def _log_prob_likelihood(self, *args):
+        raise NotImplementedError
+
+    def log_prob(self, *args):
+        raise NotImplementedError
+
+    def parameter_shapes(self):
+        param_shapes_dict = OrderedDict()
+        for name, dist in self._param_dists.items():
+            param_shapes_dict[name] = dist.event_shape
+        return param_shapes_dict 
 
 class _RandomGPBase:
 
@@ -225,52 +399,33 @@ class RandomGPMeta(_RandomGPBase):
     def log_prob(self, params, train_data_tuples):
         return self.prior_factor * self._log_prob_prior(params) + self._log_prob_likelihood(params, train_data_tuples)
 
-class RandomGPSparseMeta(gpytorch.models.ApproximateGP):
-    def __init__(self, inducing_points, feature_dim=1, prior_factor=0.01,
-                 weight_prior_std=0.5, bias_prior_std=3.0, covar_module='SE', mean_module='NN',
-                 mean_nn_layers=(32, 32), kernel_nn_layers=(32, 32)):
-        """
-        Sparse Gaussian Process Meta Model.
-        Args:
-            inducing_points: Tensor of inducing points.
-            feature_dim: Output dimensionality of NN feature map for kernel function.
-            prior_factor, weight_prior_std, bias_prior_std, covar_module, mean_module, 
-            mean_nn_layers, kernel_nn_layers: Same as in RandomGPMeta.
-        """
-        variational_distribution = gpytorch.variational.CholeskyVariationalDistribution(
-            inducing_points.size(-2))
-        variational_strategy = gpytorch.variational.VariationalStrategy(
-            self, inducing_points, variational_distribution, learn_inducing_locations=True)
-        super(RandomGPSparseMeta, self).__init__(variational_strategy)
+class SparseRandomGP(_RandomSparseGPBase):
+    def _log_prob_likelihood(self, params, x_data, y_data):
+        fn = self.get_forward_fn(params)
+        _, mll = fn(x_data, y_data)
+        return mll
 
-        # Define mean and covariance modules
-        if mean_module == 'NN':
-            self.mean_module = NeuralNetworkMean(input_dim=inducing_points.size(-1), 
-                                                 output_dim=feature_dim, 
-                                                 layer_sizes=mean_nn_layers)
-        elif mean_module == 'constant':
-            self.mean_module = ConstantMean()
-        elif mean_module == 'zero':
-            self.mean_module = ZeroMean()
-        else:
-            raise NotImplementedError('Mean module type not supported.')
+    def log_prob(self, params, x_data, y_data):
+        return self.prior_factor * self._log_prob_prior(params) + self._log_prob_likelihood(params, x_data, y_data)
 
-        if covar_module == 'SE':
-            self.covar_module = ScaleKernel(RBFKernel())
-        elif covar_module == 'NN':
-            self.covar_module = NeuralNetworkCovar(input_dim=inducing_points.size(-1), 
-                                                   output_dim=feature_dim, 
-                                                   layer_sizes=kernel_nn_layers)
-        else:
-            raise NotImplementedError('Covariance module type not supported.')
+class SparseRandomGPMeta(_RandomSparseGPBase):
+    def _log_prob_likelihood(self, params, train_data_tuples):
+        fn = self.get_forward_fn(params)
 
-        # Likelihood
-        self.likelihood = GaussianLikelihood()
+        num_datasets = len(train_data_tuples)
+        dataset_sizes = torch.tensor([train_x.shape[-2] for train_x, _ in train_data_tuples]).float().to(device)
+        harmonic_mean_dataset_size = 1. / (torch.mean(1. / dataset_sizes))
+        pre_factor = harmonic_mean_dataset_size / (harmonic_mean_dataset_size + num_datasets)
 
-    def forward(self, x):
-        mean_x = self.mean_module(x)
-        covar_x = self.covar_module(x)
-        return MultivariateNormal(mean_x, covar_x)
+        mlls = []
+        for i, (x_data, y_data) in enumerate(train_data_tuples):
+            _, mll = fn(x_data, y_data)
+            mlls.append(mll)
+        mlls = torch.stack(mlls, dim=-1)
+        return pre_factor * torch.sum(mlls, dim=-1)
+
+    def log_prob(self, params, train_data_tuples):
+        return self.prior_factor * self._log_prob_prior(params) + self._log_prob_likelihood(params, train_data_tuples)
 
 class RandomGPPosterior(torch.nn.Module):
     """
