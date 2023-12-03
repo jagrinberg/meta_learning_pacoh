@@ -7,6 +7,7 @@ import numpy as np
 from meta_learn.models import LearnedGPRegressionModel, NeuralNetwork, AffineTransformedDistribution
 from meta_learn.util import _handle_input_dimensionality, DummyLRScheduler
 from meta_learn.abstract import RegressionModelMetaLearned
+from sklearn.cluster import KMeans
 from config import device
 
 class SparseGPRegressionMetaLearned(RegressionModelMetaLearned):
@@ -70,11 +71,13 @@ class SparseGPRegressionMetaLearned(RegressionModelMetaLearned):
             inducing_points_2 = np.random.choice(y_tensor.cpu().numpy().flatten(), size=self.num_inducing_points, replace=False)
             inducing_points = np.concatenate((inducing_points_1, inducing_points_2), axis=0).reshape(self.num_inducing_points, self.feature_dim)
             inducing_points = torch.from_numpy(inducing_points).float().to(device)
+            inducing_points = torch.nn.Parameter(inducing_points)  # make inducing points a learnable parameter
             task_dict['model'] = LearnedGPRegressionModel(task_dict['train_x'], task_dict['train_y'], self.likelihood,
                                                 learned_kernel=self.nn_kernel_map, learned_mean=self.nn_mean_fn,
                                                 covar_module=gpytorch.kernels.InducingPointKernel(gpytorch.kernels.RBFKernel(ard_num_dims=feature_dim), inducing_points=inducing_points, likelihood=self.likelihood),
                                                 mean_module=self.mean_module)
             task_dict['mll_fn'] = gpytorch.mlls.ExactMarginalLogLikelihood(self.likelihood, task_dict['model']).to(device)
+            self.shared_parameters.append({'params': task_dict['model'].covar_module.inducing_points, 'lr': self.lr_params})
             self.task_dicts.append(task_dict) 
 
         # c) prepare inference
